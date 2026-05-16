@@ -6,14 +6,12 @@ Personal shell configuration managed by chezmoi.
 
 - Chezmoi source directory: `~/.local/share/chezmoi`
 - Managed Prezto config: `dot_zpreztorc` -> `~/.zpreztorc`
-- Managed Prezto runcom links: `symlink_dot_zshrc.tmpl`,
-  `symlink_dot_zshenv.tmpl`, `symlink_dot_zprofile.tmpl`,
-  `symlink_dot_zlogin.tmpl`, and `symlink_dot_zlogout.tmpl`
 
 Prezto itself is installed as an unmodified clone of
 `https://github.com/sorin-ionescu/prezto.git` at `~/.zprezto`. The standard
 runcoms such as `~/.zshrc` and `~/.zshenv` point back to
-`~/.zprezto/runcoms/` through chezmoi-managed symlink source-state files.
+`~/.zprezto/runcoms/` as part of the Prezto install, not as chezmoi-managed
+state.
 
 ## Common commands
 
