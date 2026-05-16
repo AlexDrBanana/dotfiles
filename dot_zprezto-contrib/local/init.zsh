@@ -1,15 +1,14 @@
 #
-# Executes commands at the start of an interactive session.
+# Loads local interactive shell setup.
 #
 
-# Keep Prezto's official runcom behavior outside this repository.
-if [[ -r "${ZDOTDIR:-$HOME}/.zprezto/runcoms/zshrc" ]]; then
-  source "${ZDOTDIR:-$HOME}/.zprezto/runcoms/zshrc"
-fi
-
 # User paths.
-typeset -U path PATH
-path=("$HOME/.local/bin" $path)
+typeset -gU path PATH
+path=(
+  "$HOME/.local/bin"
+  /opt/{homebrew,local}/{,s}bin(N)
+  $path
+)
 [[ -d "$HOME/.lmstudio/bin" ]] && path+=("$HOME/.lmstudio/bin")
 export PATH
 

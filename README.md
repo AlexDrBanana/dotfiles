@@ -6,19 +6,19 @@ Personal shell configuration managed by chezmoi.
 
 - Chezmoi source directory: `~/.local/share/chezmoi`
 - Managed Prezto config: `dot_zpreztorc` -> `~/.zpreztorc`
-- Managed interactive Zsh config: `dot_zshrc` -> `~/.zshrc`
+- Managed local Prezto module:
+  `dot_zprezto-contrib/local/init.zsh` -> `~/.zprezto-contrib/local/init.zsh`
 
 Prezto itself is installed as an unmodified clone of
-`https://github.com/sorin-ionescu/prezto.git` at `~/.zprezto`. The managed
-`~/.zshrc` sources Prezto's official `runcoms/zshrc` before applying local
-interactive shell setup. The other standard runcoms remain Prezto-managed
-symlinks.
+`https://github.com/sorin-ionescu/prezto.git` at `~/.zprezto`. The standard
+runcoms remain Prezto-managed symlinks. Local interactive shell setup is loaded
+as an external Prezto module via `pmodule-dirs` in `~/.zpreztorc`.
 
 ## Common commands
 
 ```sh
 chezmoi edit ~/.zpreztorc
-chezmoi edit ~/.zshrc
+chezmoi edit ~/.zprezto-contrib/local/init.zsh
 chezmoi diff
 chezmoi apply -v
 chezmoi cd
