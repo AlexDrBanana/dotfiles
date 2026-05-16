@@ -1,0 +1,26 @@
+#
+# Executes commands at the start of an interactive session.
+#
+
+# Keep Prezto's official runcom behavior outside this repository.
+if [[ -r "${ZDOTDIR:-$HOME}/.zprezto/runcoms/zshrc" ]]; then
+  source "${ZDOTDIR:-$HOME}/.zprezto/runcoms/zshrc"
+fi
+
+# User paths.
+typeset -U path PATH
+path=("$HOME/.local/bin" $path)
+[[ -d "$HOME/.lmstudio/bin" ]] && path+=("$HOME/.lmstudio/bin")
+export PATH
+
+# User environment.
+export EDITOR='code-insiders -w'
+
+# Rustup/Cargo.
+[[ -r "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+
+# Node.js version management.
+eval "$(fnm env --use-on-cd --shell zsh)"
+
+# Prompt.
+eval "$(starship init zsh)"
