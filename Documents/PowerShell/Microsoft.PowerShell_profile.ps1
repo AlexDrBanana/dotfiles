@@ -19,7 +19,7 @@ Import-Module PSFzf
 if (-not (Get-Command oh-my-posh -ErrorAction SilentlyContinue)) {
     winget install --id JanDeDobbeleer.OhMyPosh --exact --source winget --accept-package-agreements --accept-source-agreements
 }
-oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/paradox.omp.json" | Invoke-Expression
+oh-my-posh init pwsh --config paradox | Invoke-Expression
 
 if (-not (Get-Module -ListAvailable -Name PSReadLine)) {
     Install-Module -Name PSReadLine -Scope CurrentUser -Repository PSGallery -Force
