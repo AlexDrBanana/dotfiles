@@ -19,7 +19,7 @@ export EDITOR='code-insiders -w'
 [[ -r "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
 # Node.js version management.
-eval "$(fnm env --use-on-cd --shell zsh)"
+eval "$(fnm env --use-on-cd)"
 
 # Prompt.
 eval "$(starship init zsh)"
