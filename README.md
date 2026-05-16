@@ -7,6 +7,8 @@ Personal shell configuration managed by chezmoi.
 - Chezmoi source directory: `~/.local/share/chezmoi`
 - Managed Prezto config: `dot_zpreztorc` -> `~/.zpreztorc`
 - Managed interactive Zsh config: `dot_zshrc.tmpl` -> `~/.zshrc`
+- Windows exclusion: `.chezmoiignore` skips `.zpreztorc` and `.zshrc` when
+  `.chezmoi.os` is `windows`
 
 Prezto itself is installed as an unmodified clone of
 `https://github.com/sorin-ionescu/prezto.git` at `~/.zprezto`. `~/.zshrc` is
@@ -14,10 +16,11 @@ managed by chezmoi and sources Prezto with
 `source "${ZDOTDIR:-$HOME}/.zprezto/init.zsh"`, which Prezto documents as the
 supported way to keep existing Zsh configuration while loading Prezto.
 
-`dot_zshrc.tmpl` uses `.chezmoi.os` for OS-specific setup:
+`.chezmoiignore` and `dot_zshrc.tmpl` use `.chezmoi.os` for OS-specific setup:
 
 - Universal: `~/.local/bin`, `EDITOR`, Cargo/Rustup, fnm, and Starship.
 - macOS only: Homebrew/MacPorts search paths and LM Studio CLI.
+- Windows: no Zsh/Prezto targets are applied.
 
 ## Common commands
 

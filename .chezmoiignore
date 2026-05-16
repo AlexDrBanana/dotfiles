@@ -1,2 +1,7 @@
 README.md
 
+{{- if eq .chezmoi.os "windows" }}
+# Prezto/Zsh configuration is only applied on Unix-like systems.
+.zpreztorc
+.zshrc
+{{- end }}
