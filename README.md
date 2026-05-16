@@ -6,19 +6,24 @@ Personal shell configuration managed by chezmoi.
 
 - Chezmoi source directory: `~/.local/share/chezmoi`
 - Managed Prezto config: `dot_zpreztorc` -> `~/.zpreztorc`
-- Managed local Prezto module:
-  `dot_zprezto-contrib/local/init.zsh` -> `~/.zprezto-contrib/local/init.zsh`
+- Managed interactive Zsh config: `dot_zshrc.tmpl` -> `~/.zshrc`
 
 Prezto itself is installed as an unmodified clone of
-`https://github.com/sorin-ionescu/prezto.git` at `~/.zprezto`. The standard
-runcoms remain Prezto-managed symlinks. Local interactive shell setup is loaded
-as an external Prezto module via `pmodule-dirs` in `~/.zpreztorc`.
+`https://github.com/sorin-ionescu/prezto.git` at `~/.zprezto`. `~/.zshrc` is
+managed by chezmoi and sources Prezto with
+`source "${ZDOTDIR:-$HOME}/.zprezto/init.zsh"`, which Prezto documents as the
+supported way to keep existing Zsh configuration while loading Prezto.
+
+`dot_zshrc.tmpl` uses `.chezmoi.os` for OS-specific setup:
+
+- Universal: `~/.local/bin`, `EDITOR`, Cargo/Rustup, fnm, and Starship.
+- macOS only: Homebrew/MacPorts search paths and LM Studio CLI.
 
 ## Common commands
 
 ```sh
 chezmoi edit ~/.zpreztorc
-chezmoi edit ~/.zprezto-contrib/local/init.zsh
+chezmoi edit ~/.zshrc
 chezmoi diff
 chezmoi apply -v
 chezmoi cd

@@ -1,15 +1,25 @@
 #
-# Loads local interactive shell setup.
+# Executes commands at the start of an interactive session.
 #
+
+# Source Prezto.
+if [[ -s "${ZDOTDIR:-$HOME}/.zprezto/init.zsh" ]]; then
+  source "${ZDOTDIR:-$HOME}/.zprezto/init.zsh"
+fi
 
 # User paths.
 typeset -gU path PATH
 path=(
   "$HOME/.local/bin"
+{{- if eq .chezmoi.os "darwin" }}
   /opt/{homebrew,local}/{,s}bin(N)
+  /usr/local/{,s}bin(N)
+{{- end }}
   $path
 )
+{{- if eq .chezmoi.os "darwin" }}
 [[ -d "$HOME/.lmstudio/bin" ]] && path+=("$HOME/.lmstudio/bin")
+{{- end }}
 export PATH
 
 # User environment.
