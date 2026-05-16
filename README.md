@@ -7,6 +7,9 @@ Personal shell configuration managed by chezmoi.
 - Chezmoi source directory: `~/.local/share/chezmoi`
 - Managed Prezto config: `dot_zpreztorc` -> `~/.zpreztorc`
 - Managed interactive Zsh config: `dot_zshrc.tmpl` -> `~/.zshrc`
+- Managed Windows PowerShell profile:
+  `Documents/PowerShell/Microsoft.PowerShell_profile.ps1` ->
+  `~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1`
 - Windows exclusion: `.chezmoiignore` skips `.zpreztorc` and `.zshrc` when
   `.chezmoi.os` is `windows`
 
@@ -20,13 +23,15 @@ supported way to keep existing Zsh configuration while loading Prezto.
 
 - Universal: `~/.local/bin`, `EDITOR`, Cargo/Rustup, fnm, and Starship.
 - macOS only: Homebrew/MacPorts search paths and LM Studio CLI.
-- Windows: no Zsh/Prezto targets are applied.
+- Windows: no Zsh/Prezto targets are applied; the PowerShell profile is
+  applied.
 
 ## Common commands
 
 ```sh
 chezmoi edit ~/.zpreztorc
 chezmoi edit ~/.zshrc
+chezmoi edit ~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1
 chezmoi diff
 chezmoi apply -v
 chezmoi cd

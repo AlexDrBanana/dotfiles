@@ -1,5 +1,10 @@
 README.md
 
+{{- if ne .chezmoi.os "windows" }}
+# PowerShell profile is only applied on Windows.
+Documents
+{{- end }}
+
 {{- if eq .chezmoi.os "windows" }}
 # Prezto/Zsh configuration is only applied on Unix-like systems.
 .zpreztorc
