@@ -10,6 +10,10 @@ Personal shell configuration managed by chezmoi.
 - Managed Windows PowerShell profile:
   `Documents/PowerShell/Microsoft.PowerShell_profile.ps1` ->
   `~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1`
+- Managed agent skills: `dot_agents/skills` -> `~/.agents/skills`
+- Managed Codex files:
+  `dot_codex/empty_AGENTS.md` -> `~/.codex/AGENTS.md`
+  and `dot_codex/config.toml.tmpl` -> `~/.codex/config.toml`
 - Windows exclusion: `.chezmoiignore` skips `.zpreztorc` and `.zshrc` when
   `.chezmoi.os` is `windows`
 
@@ -32,6 +36,7 @@ supported way to keep existing Zsh configuration while loading Prezto.
 chezmoi edit ~/.zpreztorc
 chezmoi edit ~/.zshrc
 chezmoi edit ~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1
+chezmoi edit ~/.codex/config.toml
 chezmoi diff
 chezmoi apply -v
 chezmoi cd
