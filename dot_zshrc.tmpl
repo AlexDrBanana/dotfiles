@@ -34,3 +34,8 @@ eval "$(fnm env --use-on-cd)"
 
 # Prompt.
 eval "$(starship init zsh)"
+
+# Custom Claude Code
+claude-lighthouse() {
+  ANTHROPIC_BASE_URL=http://lighthouse:1234 claude "$@"
+}
