@@ -25,3 +25,5 @@ if (-not (Get-Module -ListAvailable -Name PSReadLine)) {
     Install-Module -Name PSReadLine -Scope CurrentUser -Repository PSGallery -Force
 }
 Set-PSReadLineOption -PredictionSource HistoryAndPlugin -PredictionViewStyle ListView
+
+fnm env --use-on-cd --shell powershell | Out-String | Invoke-Expression
