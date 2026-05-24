@@ -1,3 +1,10 @@
+[diff]
+    command = "delta"
+    args = [
+        {{ printf "%q" "{{ .Destination }}" }},
+        {{ printf "%q" "{{ .Target }}" }},
+    ]
+
 {{- if eq .chezmoi.os "linux" }}
 [merge]
     command = "nvim"
