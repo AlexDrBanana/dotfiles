@@ -30,7 +30,9 @@ export VISUAL='zed -w'
 [[ -r "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
 # Node.js version management.
-eval "$(fnm env --use-on-cd)"
+if (( $+commands[fnm] )); then
+  eval "$(fnm env --use-on-cd)"
+fi
 
 # Prompt.
 eval "$(starship init zsh)"
