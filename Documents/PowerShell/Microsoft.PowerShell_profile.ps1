@@ -27,3 +27,8 @@ if (-not (Get-Module -ListAvailable -Name PSReadLine)) {
 Set-PSReadLineOption -PredictionSource HistoryAndPlugin -PredictionViewStyle ListView
 
 fnm env --use-on-cd --shell powershell | Out-String | Invoke-Expression
+
+function get_gcloud_secret {
+    param([string]$secret)
+    gcloud secrets versions access latest --secret="$secret"
+}
