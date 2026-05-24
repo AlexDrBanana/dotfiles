@@ -46,3 +46,6 @@ get_gcloud_secret() {
 claude-lighthouse() {
   ANTHROPIC_BASE_URL=http://lighthouse:1234 claude --model qwen/qwen3.6-27b "$@"
 }
+
+# opencode
+export PATH=/Users/sguo/.opencode/bin:$PATH
