@@ -1465,6 +1465,7 @@ public static partial class WordBatchEmitter
             ParaIdToTargetIdx: null,
             DeferredBookmarks: new List<BatchItem>(),
             TextboxCounters: new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase),
+            SourceTextboxCounters: new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase),
             TableOrdinalBox: new int[1],
             CurrentCellXPathBox: new string?[1],
             CurrentCellPartBox: new string?[1],
@@ -1531,6 +1532,26 @@ public static partial class WordBatchEmitter
             {
                 Command = "remove",
                 Path = $"{partTargetPath}/p[1]",
+            });
+        }
+
+        // BUG-DUMP-HDRFTR-STRUCT-BOOKMARK: re-insert any <w:bookmarkStart>/
+        // <w:bookmarkEnd> that sat at the <w:hdr>/<w:ftr> ROOT level (between block
+        // paragraphs, not inside one). The block walk above only emits paragraph/
+        // table/sdt content, so a header/footer-scoped cross-reference target was
+        // dropped, leaving a dangling REF/PAGEREF. Replay each verbatim at its
+        // source position via raw-set into this part. (Paragraph-level header/footer
+        // bookmarks already survive through EmitParagraph; only root-direct-child
+        // markers need this.)
+        foreach (var (bmXml, relXpath, action) in word.GetPartRootStructuralBookmarks(sourcePath))
+        {
+            items.Add(new BatchItem
+            {
+                Command = "raw-set",
+                Part = hfRawPart,
+                Xpath = relXpath == "." ? hfRootXPath : $"{hfRootXPath}/{relXpath}",
+                Action = action,
+                Xml = bmXml,
             });
         }
     }
@@ -1608,6 +1629,44 @@ public static partial class WordBatchEmitter
                 props["style"] = cStyle.ToString()!;
             }
 
+            // BUG-DUMP-NOTE-PBDR (comment parity): the comment's first paragraph can
+            // carry direct paragraph formatting (alignment / indent / spacing / a
+            // paragraph border <w:pBdr> / shading / markRPr) — none of which
+            // CommentToNode surfaces onto the comment node, so the `add comment` op
+            // (built from c.Format) dropped them all (only 2nd+ paragraphs, emitted
+            // via FilterEmittableProps(para.Format), kept their pPr). Forward the
+            // first paragraph's pPr keys (the same set EmitNoteReference forwards);
+            // ApplyCommentFormatKeys -> ApplyParagraphLevelProperty applies them.
+            if (bodyParas.Count > 0)
+            {
+                foreach (var (k, v) in FilterEmittableProps(bodyParas[0].Format))
+                {
+                    if (v == null) continue;
+                    bool isParaKey = k.StartsWith("markRPr.", StringComparison.OrdinalIgnoreCase)
+                        || k.StartsWith("pbdr.", StringComparison.OrdinalIgnoreCase)
+                        || k is "shading" or "shd"
+                        || k is "lineSpacing" or "lineRule" or "spaceBefore" or "spaceAfter"
+                              or "spaceBeforeLines" or "spaceAfterLines" or "alignment" or "align"
+                              or "direction" or "leftIndent" or "rightIndent" or "firstLine"
+                              or "indent" or "firstLineIndent" or "hangingIndent"
+                              or "hanging" or "contextualSpacing" or "spaceBeforeAuto" or "spaceAfterAuto"
+                          // BUG-DUMP-NOTE-PPR-SWEEP: the rest of the direct
+                          // paragraph-formatting vocabulary the body readback emits and
+                          // ApplyParagraphLevelProperty applies — forwarded here so a
+                          // note/comment first paragraph keeps them (they were dropped
+                          // by this curated allowlist). (framePr / textDirection /
+                          // cnfStyle have no ApplyParagraphLevelProperty case yet, so
+                          // they stay out to avoid spurious unsupported warnings.)
+                          or "keepNext" or "keepLines" or "pageBreakBefore" or "widowControl"
+                          or "suppressLineNumbers" or "suppressAutoHyphens" or "suppressOverlap"
+                          or "kinsoku" or "wordWrap" or "overflowPunct" or "topLinePunct"
+                          or "autoSpaceDE" or "autoSpaceDN" or "adjustRightInd" or "snapToGrid"
+                          or "mirrorIndents" or "textAlignment" or "outlineLvl" or "textboxTightWrap";
+                    if (isParaKey && !props.ContainsKey(k))
+                        props[k] = v.ToString()!;
+                }
+            }
+
             // BUG-R6B(BUG1): always emit `text`, even when empty. An empty
             // comment (no inline text, or only an empty table) is valid OOXML;
             // omitting `text` produced a dump op that AddComment refused to
@@ -1620,7 +1679,11 @@ public static partial class WordBatchEmitter
             // the structural body-run pass below. Mirror EmitNoteReference.
             int commentSeedSkip = 0;
             if (firstParaRuns.Count > 0
-                && (firstParaRuns[0].Type == "run" || firstParaRuns[0].Type == "r"))
+                && (firstParaRuns[0].Type == "run" || firstParaRuns[0].Type == "r")
+                // BUG-DUMP-NOTE-HYPHEN: don't flatten a structural-hyphen first run
+                // into the `add comment text=` seed — let EmitContainerBodyRuns emit
+                // it as `add r hyphen=` so <w:softHyphen/>/<w:noBreakHyphen/> survive.
+                && !firstParaRuns[0].Format.ContainsKey("_hasHyphen"))
             {
                 var firstRun = firstParaRuns[0];
                 props["text"] = firstRun.Text ?? string.Empty;
@@ -1871,6 +1934,30 @@ public static partial class WordBatchEmitter
             });
             return;
         }
+        // BUG-DUMP-NOTE-HYPHEN: a run carrying a structural <w:softHyphen/> /
+        // <w:noBreakHyphen/> (RunToNode stamps _hasHyphen) must emit a typed
+        // `add r --prop hyphen=soft|noBreak` — the generic path below persists
+        // GetRunText's cached U+00AD/U+2011 glyph as literal <w:t> text and drops
+        // the structural hyphen element. The body walk handles this via
+        // TryEmitHyphenRun; mirror it here so footnote/endnote/comment runs do too.
+        if (run.Format.ContainsKey("_hasHyphen"))
+        {
+            var hyProps = FilterEmittableProps(run.Format);
+            hyProps.Remove("_hasHyphen");
+            hyProps["hyphen"] = run.Format.TryGetValue("_hasHyphen", out var hk)
+                && string.Equals(hk?.ToString(), "soft", StringComparison.OrdinalIgnoreCase)
+                ? "soft" : "noBreak";
+            if (!string.IsNullOrEmpty(run.Text)) hyProps["text"] = run.Text!;
+            else hyProps.Remove("text");
+            items.Add(new BatchItem
+            {
+                Command = "add",
+                Parent = paraTargetPath,
+                Type = "r",
+                Props = hyProps
+            });
+            return;
+        }
         var rProps = FilterEmittableProps(run.Format);
         if (!string.IsNullOrEmpty(run.Text))
             rProps["text"] = run.Text!;
@@ -2053,10 +2140,23 @@ public static partial class WordBatchEmitter
         // already carries, and text/style handled above.
         if (bodyParas.Count > 0)
         {
-            foreach (var (k, v) in bodyParas[0].Format)
+            // BUG-DUMP-NOTE-PBDR: source from FilterEmittableProps so multi-segment
+            // paragraph props (pbdr.<side> + .sz/.color/.space, shading) arrive
+            // FOLDED into the single compound value ApplyParagraphLevelProperty
+            // parses — forwarding the raw sub-keys dropped the border weight/color.
+            foreach (var (k, v) in FilterEmittableProps(bodyParas[0].Format))
             {
                 if (v == null) continue;
                 bool isParaKey = k.StartsWith("markRPr.", StringComparison.OrdinalIgnoreCase)
+                    // BUG-DUMP-NOTE-PBDR: a note's first paragraph can carry a
+                    // paragraph border (<w:pBdr>) or shading — the body paragraph
+                    // readback emits these as pbdr.<side>(.sz/.color/.space) and
+                    // shading; ApplyFootnoteEndnoteFormatKeys -> ApplyParagraphLevel
+                    // Property already applies them, but they were absent from this
+                    // forward allowlist so a bordered footnote paragraph lost its
+                    // border on round-trip. Forward the whole pbdr.* family + shading.
+                    || k.StartsWith("pbdr.", StringComparison.OrdinalIgnoreCase)
+                    || k is "shading" or "shd"
                     || k is "lineSpacing" or "lineRule" or "spaceBefore" or "spaceAfter"
                           or "spaceBeforeLines" or "spaceAfterLines" or "alignment" or "align"
                           or "direction" or "leftIndent" or "rightIndent" or "firstLine"
@@ -2067,7 +2167,35 @@ public static partial class WordBatchEmitter
                           // <w:ind w:left="0" w:firstLine="0"/> re-wrapped on
                           // replay and shifted the page bottom):
                           or "indent" or "firstLineIndent" or "hangingIndent"
-                          or "hanging" or "contextualSpacing" or "spaceBeforeAuto" or "spaceAfterAuto";
+                          or "hanging" or "contextualSpacing" or "spaceBeforeAuto" or "spaceAfterAuto"
+                          // BUG-DUMP-NOTE-PPR-SWEEP: the rest of the direct
+                          // paragraph-formatting vocabulary the body readback emits and
+                          // ApplyParagraphLevelProperty applies — forwarded here so a
+                          // note/comment first paragraph keeps them (they were dropped
+                          // by this curated allowlist). (framePr / textDirection /
+                          // cnfStyle have no ApplyParagraphLevelProperty case yet, so
+                          // they stay out to avoid spurious unsupported warnings.)
+                          or "keepNext" or "keepLines" or "pageBreakBefore" or "widowControl"
+                          or "suppressLineNumbers" or "suppressAutoHyphens" or "suppressOverlap"
+                          or "kinsoku" or "wordWrap" or "overflowPunct" or "topLinePunct"
+                          or "autoSpaceDE" or "autoSpaceDN" or "adjustRightInd" or "snapToGrid"
+                          or "mirrorIndents" or "textAlignment" or "outlineLvl" or "textboxTightWrap"
+                          // BUG-DUMP-NOTE-NUMPR: a note's first paragraph can be a
+                          // numbered/bulleted list item (direct <w:numPr>). Forward
+                          // numId+numLevel so AddFootnote/AddEndnote
+                          // (WordHandler.Add.Structure.cs) rebuild the numPr. Only
+                          // these two — NOT numFmt/listStyle/start, which would
+                          // trigger ad-hoc numbering-definition creation (BUG-DUMP26-01);
+                          // the existing /numbering raw-set already holds the def.
+                          or "numId" or "numLevel";
+                // Don't forward style-INHERITED numbering (the pStyle, forwarded
+                // separately, supplies it) — promoting inherited->explicit would
+                // duplicate it. numInherited is skipped by FilterEmittableProps, so
+                // read it from the raw first-para Format.
+                if ((k == "numId" || k == "numLevel")
+                    && bodyParas[0].Format.TryGetValue("numInherited", out var noteNi)
+                    && string.Equals(noteNi?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
+                    isParaKey = false;
                 if (isParaKey && !noteProps.ContainsKey(k))
                     noteProps[k] = v.ToString()!;
             }
@@ -2121,6 +2249,18 @@ public static partial class WordBatchEmitter
         // Carry the run's verbatim <w:rPr> so the apply side restores it.
         if (bodyRefRun != null)
         {
+            // BUG-DUMP-NOTEREF-CUSTOMMARK-DEL: the body reference run may itself be a
+            // TRACKED REVISION (most commonly a <w:del> wrapping a deleted note
+            // reference). EmitNoteReference routes the run to `add footnote`/`add
+            // endnote`, bypassing the normal run emit's revision wrapping — so without
+            // this the deletion attribution was lost and the deleted reference
+            // resurfaced as a live, accepted reference (and its custom mark, which
+            // rides in <w:delText>, became live <w:t>). Carry revision.* so the apply
+            // re-wraps the rebuilt reference run.
+            foreach (var rk in new[] { "revision.type", "revision.author", "revision.date", "revision.id" })
+                if (bodyRefRun.Format.TryGetValue(rk, out var rv) && rv != null
+                    && !string.IsNullOrEmpty(rv.ToString()))
+                    noteProps["reference." + rk] = rv.ToString()!;
             var bodyRunXml = word.GetElementXml(bodyRefRun.Path);
             if (!string.IsNullOrEmpty(bodyRunXml))
             {
@@ -2145,8 +2285,16 @@ public static partial class WordBatchEmitter
                     if (cmf is "1" or "true" or "on")
                     {
                         noteProps["referenceCustomMarkFollows"] = "1";
+                        // BUG-DUMP-NOTEREF-CUSTOMMARK-DEL: in a TRACKED-DELETION
+                        // reference run (<w:del>) the custom mark glyph rides in
+                        // <w:delText>, not <w:t> — reading only <w:t> dropped the
+                        // mark (e.g. a deleted footnote "1" silently lost the "1").
+                        // Concat both so the mark survives whether the run is live
+                        // or a deletion.
                         var markText = string.Concat(
-                            runEl.Elements(wNs2 + "t").Select(t => t.Value));
+                            runEl.Elements()
+                                .Where(e => e.Name == wNs2 + "t" || e.Name == wNs2 + "delText")
+                                .Select(e => e.Value));
                         noteProps["referenceCustomMark"] = markText;
                     }
                 }
@@ -2162,7 +2310,12 @@ public static partial class WordBatchEmitter
         // body-run pass below.
         int noteSeedSkip = 0;
         if (firstParaRuns.Count > 0
-            && (firstParaRuns[0].Type == "run" || firstParaRuns[0].Type == "r"))
+            && (firstParaRuns[0].Type == "run" || firstParaRuns[0].Type == "r")
+            // BUG-DUMP-NOTE-HYPHEN: a first content run carrying a structural
+            // hyphen must NOT be flattened into the `add <kind> text=` seed (which
+            // persists the cached U+00AD/U+2011 glyph and drops the element). Seed
+            // empty and let EmitContainerBodyRuns emit it as `add r hyphen=`.
+            && !firstParaRuns[0].Format.ContainsKey("_hasHyphen"))
         {
             var firstRun = firstParaRuns[0];
             // Emit the FIRST content run's text VERBATIM. AddFootnote/AddEndnote
@@ -2584,6 +2737,18 @@ public static partial class WordBatchEmitter
                     Action = "insertbefore",
                     Xml = rawXml
                 });
+                // CONSISTENCY(tbl-ordinal): this rich-block-SDT (no external rel)
+                // is shipped verbatim WITHOUT routing its inner <w:tbl> through
+                // EmitTable, so EmitTable's `++TableOrdinalBox` never counts them —
+                // yet the later `(//w:tbl)[N]` cell-SDT/SdtRow/tblGrid raw-set
+                // selectors count ALL tables in document order, including these.
+                // Leaving the ordinal short made every following table's selector
+                // land N tables early, dropping a locked SdtRow + dropdown-bound
+                // cells. Bump by the shipped XML's table count — mirrors the
+                // HasExternalRelRef carrier branch above (and the textbox carrier).
+                if (ctx != null && !string.IsNullOrEmpty(rawXml))
+                    ctx.TableOrdinalBox[0] += System.Text.RegularExpressions.Regex
+                        .Matches(rawXml, "<w:tbl[ >]").Count;
                 return;
             }
         }
@@ -2830,7 +2995,14 @@ public static partial class WordBatchEmitter
         => System.Text.RegularExpressions.Regex.IsMatch(
                sdtXml, @"<[A-Za-z0-9]+:repeatingSection(Item)?[ />]")
         || System.Text.RegularExpressions.Regex.IsMatch(
-               sdtXml, @"<w:docPartObj[ />]");
+               sdtXml, @"<w:docPartObj[ />]")
+        // BUG-DUMP-SDT-CHECKBOX: a <w14:checkbox> content control's sdtPr type
+        // marker (+ its checked / checkedState / uncheckedState) is not expressible
+        // through the typed `add sdt text=` path, so without recognising it here the
+        // checkbox SDT round-tripped as a plain rich-text SDT — losing the checkbox
+        // type and its checked state. Match any namespace prefix (w14/w15/…).
+        || System.Text.RegularExpressions.Regex.IsMatch(
+               sdtXml, @"<[A-Za-z0-9]+:checkbox[ />]");
 
     private static bool IsRichBlockSdt(string sdtXml)
     {
@@ -2865,6 +3037,25 @@ public static partial class WordBatchEmitter
         // the inner paragraph style (and the showingPlcHdr placeholder) survive.
         if (sdtXml.Contains("<w:pStyle", StringComparison.Ordinal))
             return true;
+        // BUG-DUMP-SDT-PPR: a content paragraph carrying direct paragraph-level
+        // formatting (jc / ind / framePr / keepNext / spacing / cnfStyle / numPr /
+        // suppressLineNumbers / the CJK kinsoku family / …) in its <w:pPr> cannot
+        // round-trip through the flat `add sdt text=` path — AddSdt seeds a
+        // default paragraph and drops ALL pPr. The pStyle/rPr triggers above only
+        // cover styled or run/mark-formatted paragraphs; a plain-run paragraph with
+        // rich pPr fell to the lossy path. Any <w:pPr> with a child element means
+        // direct paragraph formatting is present → raw-set verbatim. (An empty
+        // <w:pPr/> or <w:pPr></w:pPr> has no children and won't match.)
+        if (System.Text.RegularExpressions.Regex.IsMatch(sdtXml, "<w:pPr>\\s*<w:"))
+            return true;
+        // BUG-DUMP-SDT-NESTED: a NESTED <w:sdt> (content control inside this one)
+        // can't round-trip through the flat `add sdt text=` path — AddSdt seeds a
+        // single plain run from the concatenated text, dropping the inner SDT
+        // wrapper (its tag/id/type). The outer's own <w:sdt> opening tag is one
+        // match; a second means a nested control → raw-set verbatim. (<w:sdtPr> /
+        // <w:sdtContent> / <w:sdtEndPr> don't match "<w:sdt" + space/'>'.)
+        if (System.Text.RegularExpressions.Regex.Matches(sdtXml, "<w:sdt[ >]").Count > 1)
+            return true;
         return sdtXml.Contains("<w:hyperlink", StringComparison.Ordinal)
             || sdtXml.Contains("<w:fldChar", StringComparison.Ordinal)
             || sdtXml.Contains("w:instrText", StringComparison.Ordinal)
@@ -2878,7 +3069,14 @@ public static partial class WordBatchEmitter
             // the SDT round-trips verbatim via raw-set (no rels involved).
             || sdtXml.Contains("<w:br", StringComparison.Ordinal)
             || sdtXml.Contains("<w:tab", StringComparison.Ordinal)
-            || sdtXml.Contains("<w:cr", StringComparison.Ordinal);
+            || sdtXml.Contains("<w:cr", StringComparison.Ordinal)
+            // BUG-DUMP-EQUATION-SDT: an equation content control's math content
+            // (<m:oMath>/<m:oMathPara>) lives in m: runs, not <w:r>, so the run
+            // checks above miss it and the typed path dropped the equation. Treat
+            // math content or the <w:equation/> sdtPr marker as rich → raw-set
+            // verbatim. (Block-level equation SDTs mirror the inline fix.)
+            || sdtXml.Contains("<m:oMath", StringComparison.Ordinal)
+            || sdtXml.Contains("<w:equation", StringComparison.Ordinal);
     }
 
     // Raw injection of an <w:sdt> into the blank target preserves the element
@@ -3273,14 +3471,22 @@ public static partial class WordBatchEmitter
     }
 
     // STYLE-RAW-FALLBACK helper: parse the source styles.xml once and return a
-    // map from styleId → verbatim <w:style> XML, restricted to TABLE styles
-    // (w:type="table"). Only table styles need this fallback today: their
-    // <w:tblPr>/<w:tblStylePr>/<w:shd>/<w:trPr>/<w:tcPr> formatting has no
-    // scalar Format representation, unlike paragraph/character styles whose
-    // pPr/rPr round-trips through the scalar emit path. Keeping the scope to
-    // table styles avoids re-clobbering the (correct) scalar emit for the far
-    // more numerous paragraph/character styles. The keying id is each style's
-    // own w:styleId — callers match it against the id the `add` step used.
+    // map from styleId → verbatim <w:style> XML, for ALL styles.
+    //
+    // Originally restricted to TABLE styles (whose tblPr/tblStylePr/shd/trPr/
+    // tcPr have no scalar Format representation). But the scalar emit also
+    // silently drops rPr/pPr children it has no key for — e.g. a paragraph
+    // style whose rPr carries <w:bdr> (a run border box): the dump emitted
+    // `shading=` from the sibling <w:shd> but no border key, so a Heading with
+    // a colored border box round-tripped as a plain filled heading, reflowing
+    // the whole document (SSIM 0.69). Rather than chase every missing rPr/pPr
+    // child key (the same hardcoded-allowlist class fixed verbatim for the ¶
+    // mark and docDefaults), round-trip EVERY style's <w:style> element
+    // verbatim. The scalar `add style` still runs first (creating the style +
+    // built-in id upsert / collision suffix); the raw-set then swaps it for the
+    // source's exact copy, so no scalar/raw drift and no dropped children. The
+    // keying id is each style's own w:styleId — callers match it against the id
+    // the `add` step used.
     private static Dictionary<string, string> BuildRawTableStyleMap(WordHandler word)
     {
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -3294,8 +3500,6 @@ public static partial class WordBatchEmitter
             var wNs = (System.Xml.Linq.XNamespace)"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
             foreach (var styleEl in doc.Root?.Elements(wNs + "style") ?? Enumerable.Empty<System.Xml.Linq.XElement>())
             {
-                var type = styleEl.Attribute(wNs + "type")?.Value;
-                if (!string.Equals(type, "table", StringComparison.Ordinal)) continue;
                 var idAttr = styleEl.Attribute(wNs + "styleId");
                 var styleId = idAttr?.Value;
                 if (string.IsNullOrEmpty(styleId)) continue;

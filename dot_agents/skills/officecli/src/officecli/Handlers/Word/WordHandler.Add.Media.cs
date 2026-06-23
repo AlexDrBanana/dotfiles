@@ -561,7 +561,11 @@ public partial class WordHandler
             // reflows. Absent → null → no wp14 child emitted.
             var sizeRelH = properties.GetValueOrDefault("sizeRelH");
             var sizeRelV = properties.GetValueOrDefault("sizeRelV");
-            imgRun = CreateAnchorImageRun(relId, cxEmu, cyEmu, altText, wrapType, hPos, vPos, hRel, vRel, behind, imgDocPropId, pictureName, hAlign, vAlign, relHeight, effectExtent, wrapDist, wrapPolygon, sizeRelH, sizeRelV);
+            // BUG-DUMP-WRAPSIDE: forward the wrapSquare text side (left/right/
+            // largest) so a one-sided wrap round-trips instead of defaulting to
+            // bothSides and reflowing the text around the float.
+            var wrapSide = properties.GetValueOrDefault("wrap.side") ?? properties.GetValueOrDefault("wrapSide");
+            imgRun = CreateAnchorImageRun(relId, cxEmu, cyEmu, altText, wrapType, hPos, vPos, hRel, vRel, behind, imgDocPropId, pictureName, hAlign, vAlign, relHeight, effectExtent, wrapDist, wrapPolygon, sizeRelH, sizeRelV, wrapSide);
         }
         else
         {
@@ -1026,6 +1030,23 @@ public partial class WordHandler
                     throw new ArgumentException($"{opName} part{pi}.child{ci} requires relId and a non-empty data: URI");
                 var childPart = CreateInlinedChildPart(created, cct, childRelId!)
                     ?? throw new ArgumentException($"{opName} part{pi}.child{ci}: unsupported content type '{cct}'");
+                // BUG-DUMP-R71-USERSHAPES-IMG: recreate the child's OWN parts (a
+                // chart userShapes drawing -> its image) BEFORE feeding the child
+                // bytes, using the ORIGINAL rel id so the child's verbatim r:embed
+                // resolves without rewriting. Without this the rebuilt drawing's
+                // r:embed dangles ("relationship does not exist").
+                for (int gi = 1; properties.TryGetValue($"part{pi}.child{ci}.gc{gi}.relId", out var gcRelId); gi++)
+                {
+                    var gcUri = properties.GetValueOrDefault($"part{pi}.child{ci}.gc{gi}.data");
+                    if (string.IsNullOrEmpty(gcRelId)
+                        || !OfficeCli.Core.OleHelper.TryDecodeDataUri(gcUri, out var gcbytes, out var gcct)
+                        || gcbytes.Length == 0)
+                        throw new ArgumentException($"{opName} part{pi}.child{ci}.gc{gi} requires relId and a non-empty data: URI");
+                    var gcPart = CreateInlinedChildPart(childPart, gcct, gcRelId!)
+                        ?? throw new ArgumentException($"{opName} part{pi}.child{ci}.gc{gi}: unsupported content type '{gcct}'");
+                    using var gcms = new MemoryStream(gcbytes);
+                    gcPart.FeedData(gcms);
+                }
                 using var cms = new MemoryStream(cbytes);
                 childPart.FeedData(cms);
             }
@@ -1073,6 +1094,15 @@ public partial class WordHandler
             => hostPart.AddNewPart<DiagramPersistLayoutPart>(ct, null),
         _ when ct.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
             => hostPart.AddNewPart<ImagePart>(ct, null),
+        // BUG-DUMP-INKML: digital-ink (handwriting) parts (application/inkml+xml,
+        // referenced from <w14:contentPart r:id>) are attached via a customXml
+        // relationship — Word/the SDK reach them as a CustomXmlPart whose content
+        // type is overridden to inkml+xml. The carrier previously had no arm for
+        // this content type and aborted the whole inlined-parts step, dropping the
+        // ink drawing. Recreate it as a CustomXmlPart with the source content type
+        // so the customXml relationship + inkml payload round-trip.
+        "application/inkml+xml"
+            => hostPart.AddNewPart<CustomXmlPart>(ct, null),
         // BUG-DUMP-R55-VMLCHART: a VML shape / AlternateContent drawing embeds a
         // DrawingML chart (chart+xml, referenced by r:id). Without this the
         // inlined-parts materializer aborted the whole `add vmlshape` step and
@@ -1156,6 +1186,21 @@ public partial class WordHandler
         // text). Same content-type predicates so the two factories stay in sync.
         _ when IsEmbeddedPackageContentType(ct)
             => parent.AddNewPart<EmbeddedPackagePart>(ct, relId),
+        // BUG-DUMP-CHART-OLEDATA: a native chart's <c:externalData r:id> can point
+        // at a LEGACY embedded OLE workbook (relationship type oleObject →
+        // oleObject1.bin) rather than a modern .xlsx package. The SDK's ChartPart
+        // does not list EmbeddedObjectPart among its allowed children, so
+        // AddNewPart<EmbeddedObjectPart> on a ChartPart throws "The part cannot be
+        // added here" — failing the whole chart inlined-parts op and leaving the
+        // chart with a dangling externalData ref (chart renders without its data).
+        // Attach it via AddExtendedPart with the source oleObject relationship type
+        // (which bypasses the typed-child constraint) keeping the source rel id so
+        // the chart's verbatim <c:externalData r:id> resolves. Non-chart parents
+        // keep the typed EmbeddedObjectPart (valid there, used by VML shapes).
+        _ when IsEmbeddedOleObjectContentType(ct) && parent is ChartPart
+            => parent.AddExtendedPart(
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+                ct, ".bin", relId),
         _ when IsEmbeddedOleObjectContentType(ct)
             => parent.AddNewPart<EmbeddedObjectPart>(ct, relId),
         _ when ct.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
@@ -1200,7 +1245,7 @@ public partial class WordHandler
         // 1. Create the embedded binary payload part and rel id on the host part.
         // 2. Resolve ProgID.
         string embedRelId;
-        string progId;
+        string? progId;
         if (OfficeCli.Core.OleHelper.TryDecodeDataUri(srcPath, out var embedBytes, out var dataCt))
         {
             // dump→batch round-trip: src is a data: URI carrying the embedded
@@ -1219,13 +1264,16 @@ public partial class WordHandler
                 ?? properties.GetValueOrDefault("embedext");
             (embedRelId, _) = OfficeCli.Core.OleHelper.AddEmbeddedPartFromBytes(
                 hostPart, embedBytes, oleKind, contentType, embedExt);
-            // No file extension to sniff ProgID from — the dump always forwards
-            // it, so require it explicitly rather than guessing.
+            // BUG-DUMP-OLE-NOPROGID: ProgID is OPTIONAL in OOXML (an <o:OLEObject>
+            // may omit it), so the dump omits the progId prop when the source has
+            // none. Requiring it here threw on that valid input, failing the batch
+            // op and silently dropping the OLE object. Accept a missing progId and
+            // emit the <o:OLEObject> WITHOUT a ProgID attribute, mirroring the
+            // source. (An explicit progId is still validated.)
             progId = properties.GetValueOrDefault("progId")
-                ?? properties.GetValueOrDefault("progid")
-                ?? throw new ArgumentException(
-                    "inline ole payload (data: src) requires an explicit --prop progId");
-            OfficeCli.Core.OleHelper.ValidateProgId(progId);
+                ?? properties.GetValueOrDefault("progid");
+            if (!string.IsNullOrEmpty(progId))
+                OfficeCli.Core.OleHelper.ValidateProgId(progId);
         }
         else
         {
@@ -1363,12 +1411,17 @@ public partial class WordHandler
             imageCropAttrs = cropSb.ToString();
         }
 
+        // ProgID is optional (BUG-DUMP-OLE-NOPROGID): omit the attribute entirely
+        // when the source had none, rather than emitting ProgID="".
+        var progIdAttr = string.IsNullOrEmpty(progId)
+            ? ""
+            : $" ProgID=\"{System.Security.SecurityElement.Escape(progId)}\"";
         var oleXml = $"""
 <w:object xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:dxaOrig="{cxTwips}" w:dyaOrig="{cyTwips}">
 {shapetypeXml}<v:shape id="{shapeId}" type="#_x0000_t75" style="{shapeStyleAttr}"{oleAttr}{shapeAltAttr}>
 <v:imagedata r:id="{iconRelId}" o:title=""{imageCropAttrs}/>
 </v:shape>
-<o:OLEObject Type="Embed" ProgID="{System.Security.SecurityElement.Escape(progId)}" ShapeID="{shapeId}" DrawAspect="{drawAspect}" ObjectID="{objectId}" r:id="{embedRelId}"/>
+<o:OLEObject Type="Embed"{progIdAttr} ShapeID="{shapeId}" DrawAspect="{drawAspect}" ObjectID="{objectId}" r:id="{embedRelId}"/>
 </w:object>
 """;
         var oleObject = new EmbeddedObject(oleXml);

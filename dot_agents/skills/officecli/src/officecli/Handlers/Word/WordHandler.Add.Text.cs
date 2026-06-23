@@ -1159,7 +1159,7 @@ public partial class WordHandler
             "outlinelvl", "outlineLvl",
             "rstyle", "rStyle",
             "tabs", "tabstops",
-            "border", "borders", "shd", "shading",
+            "border", "borders", "shd", "shading", "fill",
             "font", "size", "fontsize", "fontSize", "bold", "italic", "color", "highlight",
             "underline", "strike", "strikethrough", "doublestrike", "dstrike",
             "vanish", "outline", "shadow", "emboss", "imprint", "noproof",
@@ -1482,7 +1482,15 @@ public partial class WordHandler
             properties.TryGetValue("revision.date", out pTcDate);
             properties.TryGetValue("revision.id", out pTcId);
             var pprChange = new ParagraphPropertiesChange();
-            if (!string.IsNullOrEmpty(pTcAuthor)) pprChange.Author = pTcAuthor;
+            // BUG-DUMP-PPRCHANGE-AUTHOR: w:author is a REQUIRED attribute on
+            // CT_TrackChange (pPrChange) — omitting it makes the file schema-invalid
+            // and Word repairs-on-open. A source pPrChange authored with an EMPTY
+            // name (w:author="") is common; Navigation's readback skips an empty
+            // author so revision.author never arrives here, and the old
+            // `if (!IsNullOrEmpty)` guard then dropped the attribute entirely.
+            // Always stamp author (empty string when unknown) so the marker stays
+            // schema-valid and the empty-author source round-trips faithfully.
+            pprChange.Author = pTcAuthor ?? "";
             if (!string.IsNullOrEmpty(pTcDate) && DateTime.TryParse(pTcDate, out var pTcDt))
                 pprChange.Date = pTcDt;
             pprChange.Id = !string.IsNullOrEmpty(pTcId)
@@ -1712,6 +1720,21 @@ public partial class WordHandler
     private static bool IsMathBlockContainer(OpenXmlElement parent) =>
         parent is Body or SdtBlock or Footnote or Endnote or Header or Footer;
 
+    // BUG-DUMP-COMMENT-IN-MATH: remove comment-range markers (commentRangeStart /
+    // commentRangeEnd / commentReference, any prefix) from a verbatim math fragment
+    // before it is reconstructed. These carry stale source comment ids that no
+    // longer exist after comments.xml is renumbered; the owning comment is
+    // re-anchored separately via AddComment. Leaving an empty run wrapper behind is
+    // schema-legal (it renders nothing).
+    private static string StripVerbatimCommentMarkers(string omml)
+    {
+        if (omml.IndexOf("comment", StringComparison.OrdinalIgnoreCase) < 0) return omml;
+        return System.Text.RegularExpressions.Regex.Replace(
+            omml,
+            @"<\w+:comment(?:RangeStart|RangeEnd|Reference)\b[^>]*/>",
+            string.Empty);
+    }
+
     private string AddEquation(OpenXmlElement parent, string parentPath, int? index, Dictionary<string, string> properties)
     {
         string resultPath;
@@ -1732,6 +1755,16 @@ public partial class WordHandler
             if ((properties.TryGetValue("xml", out var omml) || properties.TryGetValue("omml", out omml))
                 && !string.IsNullOrEmpty(omml) && omml.Contains("oMath", StringComparison.Ordinal))
             {
+                // BUG-DUMP-COMMENT-IN-MATH: a comment range whose End/Reference run
+                // sits INSIDE this equation rides along in the verbatim <m:oMath>,
+                // carrying the SOURCE comment id. But comments.xml is renumbered
+                // dense on replay and the comment is re-anchored separately via
+                // AddComment, so the math-borne marker keeps a now-nonexistent id —
+                // a dangling reference (silent comment loss) plus a duplicate-id
+                // desync (schema-invalid). Strip the comment-range markers from the
+                // verbatim math; the comment survives through its AddComment anchor
+                // (its end lands at the run boundary adjacent to the equation).
+                omml = StripVerbatimCommentMarkers(omml);
                 try
                 {
                     // Root is <m:oMath> → construct directly; root is <m:oMathPara>
@@ -2054,6 +2087,17 @@ public partial class WordHandler
         properties.TryGetValue("revision.author", out trackChangeAuthor);
         properties.TryGetValue("revision.date", out trackChangeDate);
         properties.TryGetValue("revision.id", out trackChangeId);
+        // BUG-DUMP-DELININS: a run that is BOTH inserted and deleted
+        // (<w:ins><w:del><w:r><w:delText>) — one reviewer inserts text, another
+        // deletes that insertion. The dump captures the outer ins as
+        // revision.* and the inner del as revision.nested.*. Without rebuilding
+        // both wrappers the deletion is lost and the text un-deletes.
+        string? nestedTcKind = null, nestedTcAuthor = null, nestedTcDate = null, nestedTcId = null;
+        if (properties.TryGetValue("revision.nested.type", out var nTcKindRaw))
+            nestedTcKind = nTcKindRaw?.Trim().ToLowerInvariant();
+        properties.TryGetValue("revision.nested.author", out nestedTcAuthor);
+        properties.TryGetValue("revision.nested.date", out nestedTcDate);
+        properties.TryGetValue("revision.nested.id", out nestedTcId);
 
         // High-level inference: if a revision.* sub-key is present
         // (author/date/id) without an explicit `revision.type=<kind>` literal,
@@ -2335,11 +2379,15 @@ public partial class WordHandler
                 : (int)Math.Round(ParseHelpers.SafeParseDouble(rCharSp, "charspacing"), MidpointRounding.AwayFromZero);
             newRProps.Spacing = new Spacing { Val = rCsTwips };
         }
-        if (properties.TryGetValue("shd", out var rShd) || properties.TryGetValue("shading", out rShd))
+        if (properties.TryGetValue("shd", out var rShd) || properties.TryGetValue("shading", out rShd)
+            || properties.TryGetValue("fill", out rShd))
         {
             // BUG-DUMP-R41-4: route through the shared ParseShadingValue so the
             // run-level <w:shd> theme-linkage (themeFill=…/themeColor=…) tail
             // round-trips; preserves the prior VAL;FILL;COLOR semantics.
+            // CONSISTENCY(shd-canonical-fill): `fill` is the canonical Get key
+            // for a solid run shading — accept it as an Add alias so dump→batch
+            // (which now carries `fill`) replays via `add run --prop fill=…`.
             newRProps.Shading = ParseShadingValue(rShd);
         }
 
@@ -2500,6 +2548,25 @@ public partial class WordHandler
             AppendTextWithBreaks(newRun, runText);
         }
 
+        // BUG-DUMP-PTABTEXT: a run that mixed a <w:ptab/> with text/delText carries
+        // the positional tab as inline props (Navigation kept it a `run` so the
+        // co-resident text survived). Rebuild the <w:ptab/> ahead of the text
+        // (ptab-then-text, the source convention) so BOTH round-trip. The later
+        // ins/del wrapper (if any) leaves the ptab in place and only converts <w:t>.
+        if (properties.TryGetValue("ptabInline", out var ptInline) && IsTruthy(ptInline))
+        {
+            var inlinePtab = new PositionalTab();
+            if (properties.TryGetValue("ptabInline.align", out var piAlign) && !string.IsNullOrWhiteSpace(piAlign))
+                inlinePtab.Alignment = ParsePtabAlignment(piAlign);
+            if (properties.TryGetValue("ptabInline.relativeTo", out var piRel) && !string.IsNullOrWhiteSpace(piRel))
+                inlinePtab.RelativeTo = ParsePtabRelativeTo(piRel);
+            if (properties.TryGetValue("ptabInline.leader", out var piLead) && !string.IsNullOrWhiteSpace(piLead))
+                inlinePtab.Leader = ParsePtabLeader(piLead);
+            var firstContent = newRun.Elements().FirstOrDefault(e => e is not RunProperties);
+            if (firstContent != null) newRun.InsertBefore(inlinePtab, firstContent);
+            else newRun.AppendChild(inlinePtab);
+        }
+
         // Dotted-key fallback: same generic helper as Set's run path.
         // Anything still unconsumed after the hand-rolled blocks above
         // gets routed through TypedAttributeFallback; failures land in
@@ -2520,7 +2587,7 @@ public partial class WordHandler
             "charspacing", "letterspacing",
             "caps", "smallcaps", "allcaps",
             "boldcs", "italiccs", "sizecs",
-            "shd", "shading",
+            "shd", "shading", "fill",
             "rstyle", "rStyle",
             "annotationRef", "annotationref",
             "hyphen",
@@ -2537,6 +2604,9 @@ public partial class WordHandler
             "revision.type",
             // BUG-DUMP7-01: consumed up-front to emit <w:sym/> in place of <w:t>.
             "sym",
+            // BUG-DUMP-PTABTEXT: consumed above to rebuild an inline <w:ptab/>
+            // that shared a run with text.
+            "ptabInline", "ptabInline.align", "ptabInline.relativeTo", "ptabInline.leader",
             // CONSISTENCY(markRPr-inherit-opt-out): consumed up-front (line ~1587)
             // to suppress markRPr→rPr type-fill on dump→batch replay. Not a real
             // OOXML attribute — pure inheritance toggle. Without this entry the
@@ -2781,8 +2851,12 @@ public partial class WordHandler
             var rPr = newRun.GetFirstChild<RunProperties>()
                    ?? newRun.PrependChild(new RunProperties());
             var rprChange = new RunPropertiesChange();
-            if (!string.IsNullOrEmpty(trackChangeAuthor))
-                rprChange.Author = trackChangeAuthor;
+            // BUG-DUMP-PPRCHANGE-AUTHOR (run side): w:author is REQUIRED on
+            // CT_TrackChange (rPrChange) — same schema rule as pPrChange above.
+            // An empty-author source marker (w:author="") must round-trip as an
+            // empty attribute, not a dropped one (which fails validation and
+            // triggers Word repair-on-open).
+            rprChange.Author = trackChangeAuthor ?? "";
             // BUG-R4F-03: RoundtripKind keeps a …Z date in Utc (see above).
             if (!string.IsNullOrEmpty(trackChangeDate)
                 && DateTime.TryParse(trackChangeDate, null, System.Globalization.DateTimeStyles.RoundtripKind, out var tcfDate))
@@ -2847,8 +2921,37 @@ public partial class WordHandler
                         t.Parent?.ReplaceChild(dt, t);
                     }
                 }
-                parentEl.ReplaceChild(wrapper, newRun);
-                wrapper.AppendChild(newRun);
+                // BUG-DUMP-DELININS: rebuild the <w:ins><w:del> stack for a run
+                // that is both inserted and deleted. The wrapper above is the
+                // OUTER ins; insert an INNER del between it and the run so the
+                // shape is <w:ins><w:del><w:r><w:delText>. ECMA-376 permits only
+                // ins⊃del nesting, so this fires only for revision.type=ins +
+                // revision.nested.type=del.
+                if (trackChangeKind == "ins" && nestedTcKind == "del")
+                {
+                    var innerDel = new DeletedRun();
+                    if (!string.IsNullOrEmpty(nestedTcAuthor)) innerDel.Author = nestedTcAuthor;
+                    if (!string.IsNullOrEmpty(nestedTcDate)
+                        && DateTime.TryParse(nestedTcDate, null, System.Globalization.DateTimeStyles.RoundtripKind, out var ndDate))
+                        innerDel.Date = ndDate;
+                    innerDel.Id = !string.IsNullOrEmpty(nestedTcId) ? nestedTcId : GenerateRevisionId();
+                    // The deleted run's text must ride in <w:delText>.
+                    foreach (var t in newRun.Elements<Text>().ToList())
+                    {
+                        var dt = new DeletedText(t.Text ?? "") { Space = t.Space };
+                        t.Parent?.ReplaceChild(dt, t);
+                    }
+                    // newRun is still a child of parentEl here — swap in the
+                    // outer ins, then nest del then the run: <w:ins><w:del><w:r>.
+                    parentEl.ReplaceChild(wrapper, newRun);
+                    wrapper.AppendChild(innerDel);
+                    innerDel.AppendChild(newRun);
+                }
+                else
+                {
+                    parentEl.ReplaceChild(wrapper, newRun);
+                    wrapper.AppendChild(newRun);
+                }
             }
         }
         // moveFrom / moveTo: low-level OOXML synthesis primitives for
@@ -2895,6 +2998,27 @@ public partial class WordHandler
                     WrapRunAsMoveFrom(newRun, moveAuthor, moveDate, trackChangeId!);
                 else
                     WrapRunAsMoveTo(newRun, moveAuthor, moveDate, trackChangeId!);
+                // BUG-DUMP-MOVE-DEL: a run that is BOTH moved AND deleted
+                // (<w:moveFrom|moveTo><w:del><w:r>) must keep its inner deletion —
+                // otherwise the moved-and-deleted text resurfaces as live, accepted
+                // content (meaning change). Insert a <w:del> between the move wrapper
+                // and the run and convert <w:t> to <w:delText>, mirroring ins⊃del.
+                if (nestedTcKind == "del" && newRun.Parent != null)
+                {
+                    var moveParent = newRun.Parent;
+                    var innerDel = new DeletedRun
+                    {
+                        Id = !string.IsNullOrEmpty(nestedTcId) ? nestedTcId : GenerateRevisionId()
+                    };
+                    if (!string.IsNullOrEmpty(nestedTcAuthor)) innerDel.Author = nestedTcAuthor;
+                    if (!string.IsNullOrEmpty(nestedTcDate)
+                        && DateTime.TryParse(nestedTcDate, null, System.Globalization.DateTimeStyles.RoundtripKind, out var mvNdDate))
+                        innerDel.Date = mvNdDate;
+                    foreach (var t in newRun.Elements<Text>().ToList())
+                        t.Parent?.ReplaceChild(new DeletedText(t.Text ?? "") { Space = t.Space }, t);
+                    moveParent.ReplaceChild(innerDel, newRun);
+                    innerDel.AppendChild(newRun);
+                }
             }
         }
 
